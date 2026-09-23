@@ -1,0 +1,11 @@
+# Secrets — jamais sur GitHub
+secrets.lua
+
+# Données personnelles / état local
+workspaces/
+corrections/
+*.bak
+*.json
+
+# Système
+.DS_Store
