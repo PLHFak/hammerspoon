@@ -34,7 +34,7 @@
 local COLLECTION_DIR  = os.getenv("HOME") .. "/.hammerspoon/workspaces"
 local COLLECTION_FILE = COLLECTION_DIR .. "/MEMCHROMEPAGES.json"
 
-local VERSION = "v27 — 2026-09-23"   -- à incrémenter à chaque modification
+local VERSION = "v28 — 2026-09-24"   -- à incrémenter à chaque modification
 
 local DEBUG = true
 local BUSY  = false          -- verrou anti double-déclenchement
@@ -234,7 +234,7 @@ local function loadCollection()
 end
 
 
-local function saveCollection(data)
+local function saveCollection(data, quick)
 
     data.name    = "MEMCHROMEPAGES"
     data.savedAt = os.date("%Y-%m-%d %H:%M:%S")
@@ -250,6 +250,9 @@ local function saveCollection(data)
 
     f:write(encoded)
     f:close()
+
+    -- quick = simple déplacement de curseur : pas d'historique
+    if quick then return true end
 
     -- Historique : une copie horodatée à chaque écriture, 20 conservées
     local histDir = COLLECTION_DIR .. "/historique"
@@ -1375,6 +1378,16 @@ local function labelsHide()
     labels = {}
 end
 
+local LABEL_SEL   = { red = 0.8, green = 0.12, blue = 0.12, alpha = 0.92 }
+local LABEL_PLAIN = { red = 0, green = 0, blue = 0, alpha = 0.72 }
+
+-- Ne change que la couleur : pas de recréation des canvas
+local function labelsSelect(selIndex)
+    for idx, c in pairs(labels) do
+        c[1].fillColor = (idx == selIndex) and LABEL_SEL or LABEL_PLAIN
+    end
+end
+
 -- items : { { index = i, rect = {x,y,w,h}, title = "…" }, … }
 local function labelsShow(items, selIndex)
 
@@ -1395,8 +1408,7 @@ local function labelsShow(items, selIndex)
 
             c[1] = { type = "rectangle", action = "fill",
                 roundedRectRadii = { xRadius = 12, yRadius = 12 },
-                fillColor = sel and { red = 0.8, green = 0.12, blue = 0.12, alpha = 0.92 }
-                               or  { red = 0, green = 0, blue = 0, alpha = 0.72 } }
+                fillColor = sel and LABEL_SEL or LABEL_PLAIN }
             c[2] = { type = "text", text = text, textSize = 18, textColor = { white = 1 },
                 textAlignment = "center", frame = { x = 8, y = 10, w = w - 16, h = h - 12 } }
 
@@ -1405,7 +1417,7 @@ local function labelsShow(items, selIndex)
             c:clickActivating(false)
             c:show()
 
-            labels[#labels + 1] = c
+            labels[it.index] = c
         end
     end
 end
@@ -1437,6 +1449,7 @@ local mosaic = { active = false, tiles = {}, sel = 0, tap = nil, before = nil, c
 
 local LIST_SLOTS   = 24
 local LIST_TIMEOUT = 5
+local LIST_FOCUS_DELAY = 0.15   -- s après le dernier F13/F14 avant de mettre la fenêtre devant
 
 local list = {
     lastClick = { i = 0, t = 0 },
@@ -1447,6 +1460,8 @@ local list = {
     top    = 1,        -- premier index affiché (défilement si > 15)
     canvas = nil,
     timer  = nil,
+    focusTimer  = nil,   -- mise devant différée
+    labelsDirty = true,  -- étiquettes à (re)créer
     snap   = nil,      -- snapshot Chrome de la session
     live   = {}        -- index -> { id, tab, name } ou false
 }
@@ -1458,7 +1473,9 @@ local function listClose()
     list.deleting = false
     if list.delTap then list.delTap:stop()  ; list.delTap = nil end
     if list.timer  then list.timer:stop()   ; list.timer  = nil end
+    if list.focusTimer then list.focusTimer:stop() ; list.focusTimer = nil end
     if list.canvas then list.canvas:delete() ; list.canvas = nil end
+    list.labelsDirty = true
 end
 
 
@@ -1476,10 +1493,17 @@ local function listRefreshLive(collection)
 
     local assigned = assignLive(collection, list.snap)
 
+    local byId = {}
+    for _, live in ipairs(list.snap) do byId[live.id] = live end
+
     for i = 1, #collection.windows do
         list.live[i] = assigned[i] or false
-        if list.live[i] then list.live[i].rect = getWindowRect(list.live[i].id) end
+        if list.live[i] then
+            local snapWin = byId[list.live[i].id]
+            list.live[i].rect = (snapWin and snapWin.bounds) or getWindowRect(list.live[i].id)
+        end
     end
+    list.labelsDirty = true
 end
 
 
@@ -1560,7 +1584,8 @@ local function listDraw(collection)
     list.canvas:clickActivating(false)
 
     -- étiquettes au milieu des fenêtres ouvertes
-    do
+    -- (créées une fois par session de liste, puis seulement recolorées)
+    if list.labelsDirty then
         local items = {}
         for i, win in ipairs(collection.windows) do
             if list.live[i] and list.live[i].rect then
@@ -1568,6 +1593,9 @@ local function listDraw(collection)
             end
         end
         labelsShow(items, list.sel)
+        list.labelsDirty = false
+    else
+        labelsSelect(list.sel)
     end
 
     -- double-clic sur une ligne : on va chercher la fenêtre et on la
@@ -1589,7 +1617,7 @@ local function listDraw(collection)
             list.sel = i
             local c = loadCollection()
             c.currentIndex = i ; c.lastRecalledIndex = i
-            saveCollection(c)
+            saveCollection(c, true)
             listDraw(c)
             return
         end
@@ -1620,6 +1648,7 @@ local function listDraw(collection)
         c.currentIndex = i ; c.lastRecalledIndex = i
         list.sel = i
         if list.live[i] then list.live[i].rect = getWindowRect(liveId) end
+        list.labelsDirty = true
         saveCollection(c)
         listDraw(c)
 
@@ -1658,14 +1687,25 @@ local function listStep(delta)
     local live = list.live[list.sel]
 
     if live then
-        -- présente : devant, sans bouger
-        focusWindowById(live.id, live.tab)
         collection.windows[list.sel].chromeWindowId = live.id
     end
 
-    saveCollection(collection)
+    saveCollection(collection, true)   -- curseur : pas d'historique
     listDraw(collection)
     listArm()
+
+    -- Mise devant différée : si on enchaîne F13/F14, seule la
+    -- dernière fenêtre est activée (un seul AppleScript).
+    if list.focusTimer then list.focusTimer:stop() end
+    if live then
+        local id, tab = live.id, live.tab
+        list.focusTimer = hs.timer.doAfter(LIST_FOCUS_DELAY, function()
+            list.focusTimer = nil
+            local t1 = nowMs()
+            focusWindowById(id, tab)
+            debugLog("LISTE", "focus " .. tostring(id), t1)
+        end)
+    end
 
     debugLog("LISTE", (delta > 0 and "F14" or "F13") .. " -> " .. list.sel
         .. (live and " (présente)" or " (absente ✗)"), t0)
@@ -1742,6 +1782,8 @@ end
 ------------------------------------------------------------
 
 local function selectCurrent()
+
+    if list.focusTimer then list.focusTimer:stop() ; list.focusTimer = nil end
 
     local collection = loadCollection()
     local total      = #collection.windows
@@ -1904,6 +1946,8 @@ end
 
 
 local function removeLastRecalledWindow()
+
+    if list.focusTimer then list.focusTimer:stop() ; list.focusTimer = nil end
 
     local collection = loadCollection()
     local total      = #collection.windows
