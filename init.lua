@@ -34,7 +34,7 @@
 local COLLECTION_DIR  = os.getenv("HOME") .. "/.hammerspoon/workspaces"
 local COLLECTION_FILE = COLLECTION_DIR .. "/MEMCHROMEPAGES.json"
 
-local VERSION = "v28 — 2026-09-24"   -- à incrémenter à chaque modification
+local VERSION = "v29 — 2026-09-25"   -- à incrémenter à chaque modification
 
 local DEBUG = true
 local BUSY  = false          -- verrou anti double-déclenchement
@@ -471,7 +471,18 @@ local CHROME_LOCAL_STATE =
     os.getenv("HOME") .. "/Library/Application Support/Google/Chrome/Local State"
 
 -- { dirs = { ["Default"] = { name=, email= }, … }, byEmail = {}, byName = {} }
+-- « Local State » fait souvent plusieurs Mo : on ne le relit que
+-- s'il a changé (cache par date de modification).
+local profilesCache = { mtime = nil, data = nil }
+
 local function chromeProfiles()
+
+    local attr  = hs.fs.attributes(CHROME_LOCAL_STATE)
+    local mtime = attr and attr.modification or nil
+
+    if profilesCache.data and profilesCache.mtime == mtime then
+        return profilesCache.data
+    end
 
     local f = io.open(CHROME_LOCAL_STATE, "r")
     if not f then return { dirs = {}, byEmail = {}, byName = {} } end
@@ -490,6 +501,9 @@ local function chromeProfiles()
         out.byName[name] = dir
         if info.gaia_name then out.byName[info.gaia_name] = dir end
     end
+
+    profilesCache.mtime = mtime
+    profilesCache.data  = out
 
     return out
 end
