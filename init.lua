@@ -34,7 +34,7 @@
 local COLLECTION_DIR  = os.getenv("HOME") .. "/.hammerspoon/workspaces"
 local COLLECTION_FILE = COLLECTION_DIR .. "/MEMCHROMEPAGES.json"
 
-local VERSION = "v29 — 2026-09-25"   -- à incrémenter à chaque modification
+local VERSION = "v30 — 2026-09-25"   -- à incrémenter à chaque modification
 
 local DEBUG = true
 local BUSY  = false          -- verrou anti double-déclenchement
@@ -1462,7 +1462,7 @@ local mosaic = { active = false, tiles = {}, sel = 0, tap = nil, before = nil, c
 ------------------------------------------------------------
 
 local LIST_SLOTS   = 24
-local LIST_TIMEOUT = 5
+local LIST_TIMEOUT = 10   -- s sans F13/F14 avant fermeture (chaque appui relance)
 local LIST_FOCUS_DELAY = 0.15   -- s après le dernier F13/F14 avant de mettre la fenêtre devant
 
 local list = {
@@ -1476,6 +1476,9 @@ local list = {
     timer  = nil,
     focusTimer  = nil,   -- mise devant différée
     labelsDirty = true,  -- étiquettes à (re)créer
+    loading     = false, -- lecture Chrome en cours (sablier)
+    pending     = 0,     -- F13/F14 reçus pendant la lecture
+    clickTap    = nil,   -- clic hors liste = fermer
     snap   = nil,      -- snapshot Chrome de la session
     live   = {}        -- index -> { id, tab, name } ou false
 }
@@ -1488,8 +1491,11 @@ local function listClose()
     if list.delTap then list.delTap:stop()  ; list.delTap = nil end
     if list.timer  then list.timer:stop()   ; list.timer  = nil end
     if list.focusTimer then list.focusTimer:stop() ; list.focusTimer = nil end
+    if list.clickTap then list.clickTap:stop() ; list.clickTap = nil end
     if list.canvas then list.canvas:delete() ; list.canvas = nil end
     list.labelsDirty = true
+    list.loading = false
+    list.pending = 0
 end
 
 
@@ -1673,9 +1679,25 @@ local function listDraw(collection)
 end
 
 
-local function listStep(delta)
+local listStepNow   -- déplacement du curseur, liste déjà ouverte
 
-    local t0 = nowMs()
+-- Un clic n'importe où (hors de la liste) ferme la liste
+local function listWatchClicks()
+    if list.clickTap then list.clickTap:stop() end
+    list.clickTap = hs.eventtap.new({ hs.eventtap.event.types.leftMouseDown }, function(e)
+        if not list.active or not list.canvas then return false end
+        local p = e:location()
+        local f = list.canvas:frame()
+        if p.x >= f.x and p.x <= f.x + f.w and p.y >= f.y and p.y <= f.y + f.h then
+            return false   -- clic dans la liste : géré par la liste
+        end
+        listClose()
+        return false
+    end)
+    list.clickTap:start()
+end
+
+local function listStep(delta)
 
     local collection = loadCollection()
     local total      = #collection.windows
@@ -1685,11 +1707,44 @@ local function listStep(delta)
         return
     end
 
-    if not list.active then
-        listRefreshLive(collection)
-        list.sel    = collection.currentIndex or 0
-        list.active = true
+    if list.loading then
+        -- lecture Chrome en cours : on cumule les appuis
+        list.pending = list.pending + delta
+        return
     end
+
+    if not list.active then
+        -- ouverture : sablier tout de suite, lecture Chrome juste après
+        list.active  = true
+        list.loading = true
+        list.pending = delta
+        list.sel     = collection.currentIndex or 0
+        msg("⏳ LISTE", "lecture des fenêtres Chrome…", 3)
+        hs.timer.doAfter(0.02, function()
+            local t0 = nowMs()
+            local ok, err = pcall(listRefreshLive, collection)
+            list.loading = false
+            if not ok then
+                print("[MCP LUA ERROR] liste : " .. tostring(err))
+                listClose()
+                return
+            end
+            hs.alert.closeAll()
+            listWatchClicks()
+            debugLog("LISTE", "ouverture", t0)
+            local d = list.pending ; list.pending = 0
+            listStepNow(collection, d)
+        end)
+        return
+    end
+
+    listStepNow(collection, delta)
+end
+
+listStepNow = function(collection, delta)
+
+    local t0    = nowMs()
+    local total = #collection.windows
 
     list.sel = list.sel + delta
     if list.sel > total then list.sel = 1 end
@@ -1978,6 +2033,7 @@ local function removeLastRecalledWindow()
         listRefreshLive(collection)
         list.sel = math.max(1, math.min(total, collection.currentIndex or 1))
         list.active = true
+        listWatchClicks()
     end
 
     list.deleting = true
